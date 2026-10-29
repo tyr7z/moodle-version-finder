@@ -1,6 +1,7 @@
 import hashlib
 import requests
 import os
+import re
 import time
 
 API_TAGS = "https://api.github.com/repos/moodle/moodle/tags"
@@ -21,6 +22,63 @@ DB_FILE = "version.txt"
 
 def md5(data):
     return hashlib.md5(data).hexdigest()
+
+
+def version_key(tag):
+    """Sort key: v4.1.2 > v4.1.2-rc1 > v4.1.2-beta > v4.1.2-alpha > v4.1.1"""
+    base, _, rest = tag.partition("-")
+    nums = tuple(int(n) for n in re.findall(r"\d+", base))
+    low = tag.lower()
+
+    if "alpha" in low:
+        stage = 0
+    elif "beta" in low:
+        stage = 1
+    elif "rc" in low:
+        stage = 2
+    elif tag.endswith("+"):
+        stage = 4
+    else:
+        stage = 3
+
+    suffix = tuple(int(n) for n in re.findall(r"\d+", rest))
+    return nums, stage, suffix
+
+
+def sort_db():
+    """Sort DB newest tag first. Order inside a tag is kept (stable sort)."""
+    if not os.path.exists(DB_FILE):
+        return
+
+    with open(DB_FILE, "r", encoding="utf-8") as f:
+        lines = [l.rstrip("\n") for l in f if l.strip()]
+
+    entries = []
+    seen = set()
+
+    for line in lines:
+        parts = line.split(",", 2)
+
+        if len(parts) != 3:
+            continue
+
+        # drop exact duplicates (e.g. from interrupted runs)
+        key = (parts[0], parts[2])
+        if key in seen:
+            continue
+        seen.add(key)
+
+        entries.append(parts)
+
+    entries.sort(key=lambda p: version_key(p[0]), reverse=True)
+
+    tmp = DB_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        for tag, h, path in entries:
+            f.write(f"{tag},{h},{path}\n")
+
+    os.replace(tmp, DB_FILE)
+    print(f"Sorted {len(entries)} entries in {DB_FILE}")
 
 
 def load_existing():
@@ -70,7 +128,7 @@ def fetch_hash(tag, path):
 
         return md5(r.content)
 
-    except:
+    except Exception:
         return None
 
 
@@ -81,26 +139,30 @@ def main():
     tags = get_tags()
     print("Total tags:", len(tags))
 
-    with open(DB_FILE, "a", encoding="utf-8") as db:
-        for tag in tags:
-            if tag in tags_done:
-                print("Skip tag", tag)
-                continue
-
-            print("Processing", tag)
-
-            for path in FILES:
-                h = fetch_hash(tag, path)
-
-                if not h:
+    try:
+        with open(DB_FILE, "a", encoding="utf-8") as db:
+            for tag in tags:
+                if tag in tags_done:
+                    print("Skip tag", tag)
                     continue
 
-                line = f"{tag},{h},/{path}"
+                print("Processing", tag)
 
-                db.write(line + "\n")
+                for path in FILES:
+                    h = fetch_hash(tag, path)
 
-            db.flush()
-            # time.sleep(0.15)
+                    if not h:
+                        continue
+
+                    line = f"{tag},{h},/{path}"
+
+                    db.write(line + "\n")
+
+                db.flush()
+                # time.sleep(0.15)
+    finally:
+        # runs on normal finish and on Ctrl+C / errors
+        sort_db()
 
 
 if __name__ == "__main__":
