@@ -1,48 +1,18 @@
-import hashlib
-import requests
+#!/usr/bin/env python3
+"""Collect public Moodle release file hashes in version.txt.
+
+Usage:
+    python version_scraper.py
+"""
+
 import os
-import re
-import time
+
+import requests
+
+from version_common import DEFAULT_DB, FILES, HEADERS, RAW, md5, version_key
 
 API_TAGS = "https://api.github.com/repos/moodle/moodle/tags"
-
-FILES = [
-    "admin/environment.xml",
-    "composer.lock",
-    "lib/upgrade.txt",
-    "privacy/export_files/general.js",
-    "composer.json",
-    "question/upgrade.txt",
-    "admin/tool/lp/tests/behat/course_competencies.feature",
-]
-
-RAW = "https://raw.githubusercontent.com/moodle/moodle/{}/{}"
-DB_FILE = "version.txt"
-
-
-def md5(data):
-    return hashlib.md5(data).hexdigest()
-
-
-def version_key(tag):
-    """Sort key: v4.1.2 > v4.1.2-rc1 > v4.1.2-beta > v4.1.2-alpha > v4.1.1"""
-    base, _, rest = tag.partition("-")
-    nums = tuple(int(n) for n in re.findall(r"\d+", base))
-    low = tag.lower()
-
-    if "alpha" in low:
-        stage = 0
-    elif "beta" in low:
-        stage = 1
-    elif "rc" in low:
-        stage = 2
-    elif tag.endswith("+"):
-        stage = 4
-    else:
-        stage = 3
-
-    suffix = tuple(int(n) for n in re.findall(r"\d+", rest))
-    return nums, stage, suffix
+DB_FILE = DEFAULT_DB
 
 
 def sort_db():
@@ -51,7 +21,7 @@ def sort_db():
         return
 
     with open(DB_FILE, "r", encoding="utf-8") as f:
-        lines = [l.rstrip("\n") for l in f if l.strip()]
+        lines = [line.rstrip("\n") for line in f if line.strip()]
 
     entries = []
     seen = set()
@@ -62,7 +32,7 @@ def sort_db():
         if len(parts) != 3:
             continue
 
-        # drop exact duplicates (e.g. from interrupted runs)
+        # Keep the first entry for each tag and path.
         key = (parts[0], parts[2])
         if key in seen:
             continue
@@ -105,8 +75,11 @@ def get_tags():
     page = 1
 
     while True:
-        r = requests.get(API_TAGS, params={"per_page": 100, "page": page})
-        data = r.json()
+        response = requests.get(
+            API_TAGS, headers=HEADERS, params={"per_page": 100, "page": page}, timeout=30
+        )
+        response.raise_for_status()
+        data = response.json()
 
         if not data:
             break
@@ -121,14 +94,14 @@ def fetch_hash(tag, path):
     url = RAW.format(tag, path)
 
     try:
-        r = requests.get(url, timeout=20)
+        response = requests.get(url, headers=HEADERS, timeout=20)
 
-        if r.status_code != 200:
+        if response.status_code != 200:
             return None
 
-        return md5(r.content)
+        return md5(response.content)
 
-    except Exception:
+    except requests.RequestException:
         return None
 
 
@@ -159,7 +132,6 @@ def main():
                     db.write(line + "\n")
 
                 db.flush()
-                # time.sleep(0.15)
     finally:
         # runs on normal finish and on Ctrl+C / errors
         sort_db()

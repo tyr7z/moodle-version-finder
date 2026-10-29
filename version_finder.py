@@ -11,33 +11,15 @@ Usage:
 """
 
 import argparse
-import hashlib
-import re
 import sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
-DEFAULT_DB = "version.txt"
-
-# Same list as the scraper (must match the paths stored in version.txt)
-FILES = [
-    "admin/environment.xml",
-    "composer.lock",
-    "lib/upgrade.txt",
-    "privacy/export_files/general.js",
-    "composer.json",
-    "question/upgrade.txt",
-    "admin/tool/lp/tests/behat/course_competencies.feature",
-]
-
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+from version_common import DEFAULT_DB, FILES, HEADERS, md5, version_key
 
 
-# --------------------------------------------------------------------------- #
-# Database
-# --------------------------------------------------------------------------- #
 def load_db(path):
     """
     Returns:
@@ -66,48 +48,27 @@ def load_db(path):
     return by_file, by_tag
 
 
-def version_key(tag):
-    """Sort key so that v4.1.2 > v4.1.2-rc1 > v4.1.2-beta > v4.1.1 ..."""
-    nums = tuple(int(n) for n in re.findall(r"\d+", tag.split("-")[0]))
-    low = tag.lower()
-    if "alpha" in low:
-        stage = 0
-    elif "beta" in low:
-        stage = 1
-    elif "rc" in low:
-        stage = 2
-    elif tag.endswith("+"):
-        stage = 4
-    else:
-        stage = 3
-    suffix = tuple(int(n) for n in re.findall(r"\d+", "-".join(tag.split("-")[1:])))
-    return nums, stage, suffix
-
-
-# --------------------------------------------------------------------------- #
-# Fetching
-# --------------------------------------------------------------------------- #
 def fetch_hash(base, path, timeout, verify):
     url = f"{base}/{path}"
     try:
-        r = requests.get(
+        response = requests.get(
             url,
             headers=HEADERS,
             timeout=timeout,
             verify=verify,
             allow_redirects=True,
         )
-        if r.status_code != 200 or not r.content:
-            return path, None, r.status_code
-        return path, hashlib.md5(r.content).hexdigest(), 200
+        if response.status_code != 200 or not response.content:
+            return path, None, response.status_code
+        return path, md5(response.content), 200
     except requests.RequestException as e:
         return path, None, type(e).__name__
 
 
 def fingerprint_target(base, timeout, verify, threads):
     found = {}
-    with ThreadPoolExecutor(max_workers=threads) as ex:
-        results = ex.map(lambda p: fetch_hash(base, p, timeout, verify), FILES)
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        results = executor.map(lambda p: fetch_hash(base, p, timeout, verify), FILES)
         for path, h, status in results:
             if h:
                 print(f"  [+] {path:<58} {h}")
@@ -117,9 +78,6 @@ def fingerprint_target(base, timeout, verify, threads):
     return found
 
 
-# --------------------------------------------------------------------------- #
-# Matching
-# --------------------------------------------------------------------------- #
 def score_tags(found, by_file, by_tag):
     """
     For every tag count:
@@ -148,17 +106,17 @@ def summarize(tags):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Moodle version fingerprinter")
-    ap.add_argument("url", help="Base URL of the Moodle site")
-    ap.add_argument("--db", default=DEFAULT_DB, help="Hash database (default: version.txt)")
-    ap.add_argument("--timeout", type=int, default=15)
-    ap.add_argument("--threads", type=int, default=5)
-    ap.add_argument("--top", type=int, default=15, help="Max candidates to list")
-    ap.add_argument("--insecure", action="store_true", help="Do not verify TLS certificates")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser(description="Moodle version fingerprinter")
+    parser.add_argument("url", help="Base URL of the Moodle site")
+    parser.add_argument("--db", default=DEFAULT_DB, help="Hash database (default: version.txt)")
+    parser.add_argument("--timeout", type=int, default=15)
+    parser.add_argument("--threads", type=int, default=5)
+    parser.add_argument("--top", type=int, default=15, help="Max candidates to list")
+    parser.add_argument("--insecure", action="store_true", help="Do not verify TLS certificates")
+    args = parser.parse_args()
 
     base = args.url.rstrip("/")
-    if not re.match(r"^https?://", base):
+    if not base.startswith(("http://", "https://")):
         base = "https://" + base
 
     by_file, by_tag = load_db(args.db)
@@ -177,8 +135,10 @@ def main():
     known = {p: h for p, h in found.items() if h in by_file.get(p, {})}
     unknown = [p for p in found if p not in known]
     if unknown:
-        print(f"\n[!] {len(unknown)} file(s) have hashes not in the DB "
-              f"(custom/patched install, newer release, or soft-404 page):")
+        print(
+            f"\n[!] {len(unknown)} file(s) have hashes not in the DB "
+            "(custom/patched install, newer release, or soft-404 page):"
+        )
         for p in unknown:
             print(f"      {p}")
 
@@ -188,18 +148,16 @@ def main():
     scores = score_tags(found, by_file, by_tag)
     best = max((m - mm, m) for m, mm in scores.values())
     best_tags = [t for t, (m, mm) in scores.items() if (m - mm, m) == best]
-    matches, _ = best
-    # `best` is (m - mm, m); recompute for display
-    m_best = scores[best_tags[0]][0]
-    mm_best = scores[best_tags[0]][1]
+    best_matches = scores[best_tags[0]][0]
+    best_mismatches = scores[best_tags[0]][1]
 
-    exact = mm_best == 0 and m_best == len(known)
+    exact = best_mismatches == 0 and best_matches == len(known)
 
     print("\n" + "=" * 70)
     if exact:
-        print(f"[✓] All {m_best} recognised file(s) agree.")
+        print(f"[✓] All {best_matches} recognised file(s) agree.")
     else:
-        print(f"[~] Best partial match: {m_best} matching, {mm_best} differing file(s).")
+        print(f"[~] Best partial match: {best_matches} matching, {best_mismatches} differing file(s).")
     print(f"[✓] Version range: {summarize(best_tags)}")
     print("=" * 70)
 
