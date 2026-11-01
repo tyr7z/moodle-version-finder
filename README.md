@@ -35,5 +35,3 @@ python version_scraper.py
 The scraper reads public Moodle releases from GitHub and updates `version.txt`
 in the current directory. The refiner also uses GitHub; set `GITHUB_TOKEN` if
 you run into its API rate limit.
-
-Only check sites you own or have permission to test.
